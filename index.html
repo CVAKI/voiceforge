@@ -1,3 +1,4 @@
+cat > /mnt/user-data/outputs/voiceforge.html << 'HTMLEOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -19,276 +20,280 @@
   select option{background:#0a1214;color:#c8e8e5;}
   @keyframes wave{from{height:8px;}to{height:36px;}}
   @keyframes fadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
-  @keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useRef, useEffect } = React;
+const { useState, useRef } = React;
+
+const BASE = "https://api.elevenlabs.io";
 
 function WaveBar({ active, i }) {
-  return (
-    <div style={{
-      width: 3, borderRadius: 2,
-      background: active ? "#00ffe7" : "#1a2a2a",
-      animation: active ? `wave ${0.4 + (i % 5) * 0.1}s ease-in-out infinite alternate` : "none",
-      height: active ? undefined : 10,
-      alignSelf: "center",
-    }}/>
-  );
+  return <div style={{
+    width:3, borderRadius:2,
+    background: active?"#00ffe7":"#1a2a2a",
+    animation: active?`wave ${0.4+(i%5)*0.1}s ease-in-out infinite alternate`:"none",
+    height: active?undefined:10, alignSelf:"center",
+  }}/>;
 }
-
-function Waveform({ active, bars = 32 }) {
-  return (
-    <div style={{ display:"flex", gap:3, alignItems:"stretch", height:40 }}>
-      {Array.from({length:bars}).map((_,i) => <WaveBar key={i} active={active} i={i}/>)}
-    </div>
-  );
+function Waveform({ active, bars=32 }) {
+  return <div style={{display:"flex",gap:3,alignItems:"stretch",height:40}}>
+    {Array.from({length:bars}).map((_,i)=><WaveBar key={i} active={active} i={i}/>)}
+  </div>;
 }
 
 function App() {
-  const [step, setStep] = useState("key");
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeyError, setApiKeyError] = useState("");
+  const [step, setStep]           = useState("key");
+  const [apiKey, setApiKey]       = useState("");
+  const [keyErr, setKeyErr]       = useState("");
   const [voiceName, setVoiceName] = useState("");
-  const [files, setFiles] = useState([]);
-  const [cloneStatus, setCloneStatus] = useState("");
-  const [cloning, setCloning] = useState(false);
-  const [clonedVoices, setClonedVoices] = useState([]);
-  const [selectedVoice, setSelectedVoice] = useState("");
-  const [text, setText] = useState("");
+  const [files, setFiles]         = useState([]);
+  const [cloneMsg, setCloneMsg]   = useState("");
+  const [cloning, setCloning]     = useState(false);
+  const [voices, setVoices]       = useState([]);
+  const [selVoice, setSelVoice]   = useState("");
+  const [text, setText]           = useState("");
   const [generating, setGenerating] = useState(false);
-  const [audioUrl, setAudioUrl] = useState("");
-  const [genError, setGenError] = useState("");
-  const [playing, setPlaying] = useState(false);
-  const fileInputRef = useRef(null);
+  const [audioUrl, setAudioUrl]   = useState("");
+  const [genErr, setGenErr]       = useState("");
+  const [playing, setPlaying]     = useState(false);
+  const fileRef = useRef(null);
   const STEPS = ["key","clone","speak"];
-  const stepIdx = STEPS.indexOf(step);
+  const si = STEPS.indexOf(step);
 
+  // ── helpers ──────────────────────────────────────────────
+  function hdrs(extra={}) {
+    return { "xi-api-key": apiKey.trim(), ...extra };
+  }
+
+  async function apiFetch(path, opts={}) {
+    const res = await fetch(BASE + path, {
+      ...opts,
+      headers: { ...hdrs(), ...(opts.headers||{}) },
+    });
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try { const j=await res.json(); msg = j?.detail?.message || j?.detail || msg; } catch{}
+      throw new Error(msg);
+    }
+    return res;
+  }
+
+  // ── step 1: verify key by fetching voices ────────────────
   async function verifyKey() {
-    if (!apiKey.trim()) return setApiKeyError("Enter your ElevenLabs API key.");
-    setApiKeyError("Verifying...");
+    const k = apiKey.trim();
+    if (!k) return setKeyErr("Paste your API key first.");
+    setKeyErr("Connecting...");
     try {
-      const res = await fetch("https://api.elevenlabs.io/v1/user", {
-        headers: { "xi-api-key": apiKey },
+      const res = await fetch(`${BASE}/v1/voices`, {
+        headers: { "xi-api-key": k },
       });
-      if (!res.ok) throw new Error();
-      const vRes = await fetch("https://api.elevenlabs.io/v1/voices", {
-        headers: { "xi-api-key": apiKey },
-      });
-      const vData = await vRes.json();
-      const myVoices = (vData.voices || []).filter(v => v.category === "cloned");
-      setClonedVoices(myVoices);
-      if (myVoices.length) setSelectedVoice(myVoices[0].voice_id);
-      setApiKeyError("");
+      if (res.status === 401) throw new Error("401 – Key rejected by ElevenLabs.");
+      if (!res.ok)            throw new Error(`Server error ${res.status}`);
+      const data = await res.json();
+      const cloned = (data.voices||[]).filter(v=>v.category==="cloned");
+      setVoices(cloned);
+      if (cloned.length) setSelVoice(cloned[0].voice_id);
+      setKeyErr("");
       setStep("clone");
-    } catch {
-      setApiKeyError("❌ Invalid API key or network error.");
+    } catch(e) {
+      if (e instanceof TypeError) {
+        setKeyErr("❌ Network / CORS error. Open the app from a hosted URL (Netlify), not from downloads.");
+      } else {
+        setKeyErr("❌ " + e.message);
+      }
     }
   }
 
+  // ── step 2: clone voice ──────────────────────────────────
   async function cloneVoice() {
-    if (!voiceName.trim()) return setCloneStatus("Give your voice a name.");
-    if (files.length === 0) return setCloneStatus("Upload at least one audio sample.");
-    setCloning(true);
-    setCloneStatus("Cloning voice...");
+    if (!voiceName.trim()) return setCloneMsg("Give your voice a name.");
+    if (!files.length)     return setCloneMsg("Upload at least one audio file.");
+    setCloning(true); setCloneMsg("Cloning...");
     try {
       const form = new FormData();
       form.append("name", voiceName);
-      files.forEach(f => form.append("files", f));
-      const res = await fetch("https://api.elevenlabs.io/v1/voices/add", {
-        method: "POST",
-        headers: { "xi-api-key": apiKey },
-        body: form,
+      files.forEach(f=>form.append("files",f));
+      const res = await fetch(`${BASE}/v1/voices/add`, {
+        method:"POST", headers: hdrs(), body: form,
       });
+      if (!res.ok) {
+        let msg=`HTTP ${res.status}`;
+        try{const j=await res.json();msg=j?.detail?.message||j?.detail||msg;}catch{}
+        throw new Error(msg);
+      }
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail?.message || "Clone failed");
-      setSelectedVoice(data.voice_id);
-      setClonedVoices(prev => [{ voice_id: data.voice_id, name: voiceName }, ...prev]);
-      setCloneStatus(`✅ "${voiceName}" cloned!`);
-      setTimeout(() => setStep("speak"), 800);
-    } catch(e) {
-      setCloneStatus("❌ " + e.message);
-    }
+      setSelVoice(data.voice_id);
+      setVoices(prev=>[{voice_id:data.voice_id,name:voiceName},...prev]);
+      setCloneMsg(`✅ "${voiceName}" cloned!`);
+      setTimeout(()=>setStep("speak"), 800);
+    } catch(e) { setCloneMsg("❌ "+e.message); }
     setCloning(false);
   }
 
+  // ── step 3: generate speech ──────────────────────────────
   async function generateSpeech() {
-    if (!text.trim()) return setGenError("Enter some text.");
-    if (!selectedVoice) return setGenError("No voice selected.");
-    setGenerating(true); setGenError(""); setAudioUrl("");
+    if (!text.trim()) return setGenErr("Enter some text.");
+    if (!selVoice)    return setGenErr("No voice selected.");
+    setGenerating(true); setGenErr(""); setAudioUrl("");
     try {
-      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${selectedVoice}`, {
-        method: "POST",
-        headers: { "xi-api-key": apiKey, "Content-Type": "application/json" },
+      const res = await fetch(`${BASE}/v1/text-to-speech/${selVoice}`, {
+        method:"POST",
+        headers: hdrs({"Content-Type":"application/json"}),
         body: JSON.stringify({
-          text,
-          model_id: "eleven_multilingual_v2",
-          voice_settings: { stability: 0.5, similarity_boost: 0.85 },
+          text, model_id:"eleven_multilingual_v2",
+          voice_settings:{stability:0.5,similarity_boost:0.85},
         }),
       });
-      if (!res.ok) { const e = await res.json(); throw new Error(e.detail?.message || "Failed"); }
-      const blob = await res.blob();
-      setAudioUrl(URL.createObjectURL(blob));
-    } catch(e) { setGenError("❌ " + e.message); }
+      if (!res.ok) {
+        let msg=`HTTP ${res.status}`;
+        try{const j=await res.json();msg=j?.detail?.message||j?.detail||msg;}catch{}
+        throw new Error(msg);
+      }
+      setAudioUrl(URL.createObjectURL(await res.blob()));
+    } catch(e) { setGenErr("❌ "+e.message); }
     setGenerating(false);
   }
 
-  const cs = (cond, a, b={}) => cond ? {...b,...a} : b;
-
+  // ── styles ───────────────────────────────────────────────
   const S = {
-    root:{ minHeight:"100vh", background:"#080b0d", display:"flex", flexDirection:"column", alignItems:"center", padding:"40px 16px", position:"relative", overflow:"hidden" },
-    bg:{ position:"fixed", inset:0, zIndex:0, background:"radial-gradient(ellipse 60% 40% at 20% 20%, rgba(0,255,231,0.04) 0%, transparent 70%), radial-gradient(ellipse 50% 50% at 80% 80%, rgba(0,180,140,0.05) 0%, transparent 70%), #080b0d", pointerEvents:"none" },
-    grid:{ position:"fixed", inset:0, zIndex:0, backgroundImage:"linear-gradient(rgba(0,255,231,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(0,255,231,0.025) 1px, transparent 1px)", backgroundSize:"40px 40px", pointerEvents:"none" },
-    card:{ width:"100%", maxWidth:540, background:"rgba(10,18,20,0.97)", border:"1px solid rgba(0,255,231,0.15)", borderRadius:16, padding:"36px 28px", position:"relative", zIndex:1, animation:"fadeUp 0.5s ease", boxShadow:"0 0 60px rgba(0,255,231,0.05), inset 0 1px 0 rgba(0,255,231,0.08)" },
-    tag:{ fontFamily:"'Share Tech Mono'", fontSize:11, color:"#00ffe7", letterSpacing:3, marginBottom:8, opacity:0.7 },
-    title:{ fontSize:32, fontWeight:700, color:"#fff", lineHeight:1.1, marginBottom:4 },
-    sub:{ fontSize:14, color:"#4a7a77", marginBottom:28, lineHeight:1.6 },
-    label:{ fontSize:12, color:"#6aaeaa", fontWeight:600, letterSpacing:2, marginBottom:8, display:"block" },
-    input:{ width:"100%", background:"rgba(0,255,231,0.03)", border:"1px solid rgba(0,255,231,0.12)", borderRadius:8, padding:"12px 14px", color:"#c8e8e5", fontFamily:"'Share Tech Mono'", fontSize:13, marginBottom:16 },
-    textarea:{ width:"100%", background:"rgba(0,255,231,0.03)", border:"1px solid rgba(0,255,231,0.12)", borderRadius:8, padding:"12px 14px", color:"#c8e8e5", fontFamily:"'Rajdhani'", fontSize:15, resize:"vertical", minHeight:110, marginBottom:8 },
-    select:{ width:"100%", background:"rgba(0,255,231,0.03)", border:"1px solid rgba(0,255,231,0.12)", borderRadius:8, padding:"12px 14px", color:"#c8e8e5", fontFamily:"'Share Tech Mono'", fontSize:13, marginBottom:16, cursor:"pointer" },
-    btn:{ width:"100%", padding:"14px", background:"transparent", border:"1.5px solid #00ffe7", borderRadius:8, color:"#00ffe7", fontFamily:"'Rajdhani'", fontWeight:700, fontSize:16, letterSpacing:2, cursor:"pointer", transition:"all 0.2s" },
-    btnOn:{ background:"#00ffe7", color:"#080b0d", boxShadow:"0 0 20px rgba(0,255,231,0.3)" },
-    btnOff:{ opacity:0.35, cursor:"not-allowed" },
-    err:{ fontFamily:"'Share Tech Mono'", fontSize:12, color:"#ff4466", marginBottom:12, padding:"8px 12px", background:"rgba(255,68,102,0.08)", borderRadius:6, border:"1px solid rgba(255,68,102,0.2)" },
-    ok:{ fontFamily:"'Share Tech Mono'", fontSize:12, color:"#00ffe7", marginBottom:12, padding:"8px 12px", background:"rgba(0,255,231,0.06)", borderRadius:6, border:"1px solid rgba(0,255,231,0.2)" },
-    drop:{ border:"1.5px dashed rgba(0,255,231,0.2)", borderRadius:10, padding:"24px", textAlign:"center", marginBottom:16, cursor:"pointer", background:"rgba(0,255,231,0.02)" },
-    divider:{ display:"flex", alignItems:"center", gap:12, marginBottom:20 },
-    divLine:{ flex:1, height:1, background:"rgba(0,255,231,0.08)" },
-    divTxt:{ fontSize:11, color:"#2a5a57", fontFamily:"'Share Tech Mono'", letterSpacing:2 },
-    audioCard:{ background:"rgba(0,255,231,0.04)", border:"1px solid rgba(0,255,231,0.15)", borderRadius:10, padding:"16px", marginTop:16 },
-    stepDot:(a,d)=>({ flex:1, height:3, borderRadius:2, background: d?"#00ffe7":a?"rgba(0,255,231,0.5)":"rgba(0,255,231,0.1)", transition:"background 0.4s" }),
+    root:{minHeight:"100vh",background:"#080b0d",display:"flex",flexDirection:"column",alignItems:"center",padding:"40px 16px",position:"relative",overflow:"hidden"},
+    bg:{position:"fixed",inset:0,zIndex:0,background:"radial-gradient(ellipse 60% 40% at 20% 20%,rgba(0,255,231,0.04) 0%,transparent 70%),radial-gradient(ellipse 50% 50% at 80% 80%,rgba(0,180,140,0.05) 0%,transparent 70%),#080b0d",pointerEvents:"none"},
+    grid:{position:"fixed",inset:0,zIndex:0,backgroundImage:"linear-gradient(rgba(0,255,231,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,231,0.025) 1px,transparent 1px)",backgroundSize:"40px 40px",pointerEvents:"none"},
+    card:{width:"100%",maxWidth:540,background:"rgba(10,18,20,0.97)",border:"1px solid rgba(0,255,231,0.15)",borderRadius:16,padding:"36px 28px",position:"relative",zIndex:1,animation:"fadeUp 0.5s ease",boxShadow:"0 0 60px rgba(0,255,231,0.05),inset 0 1px 0 rgba(0,255,231,0.08)"},
+    tag:{fontFamily:"'Share Tech Mono'",fontSize:11,color:"#00ffe7",letterSpacing:3,marginBottom:8,opacity:0.7},
+    title:{fontSize:32,fontWeight:700,color:"#fff",lineHeight:1.1,marginBottom:4},
+    sub:{fontSize:14,color:"#4a7a77",marginBottom:28,lineHeight:1.6},
+    lbl:{fontSize:12,color:"#6aaeaa",fontWeight:600,letterSpacing:2,marginBottom:8,display:"block"},
+    inp:{width:"100%",background:"rgba(0,255,231,0.03)",border:"1px solid rgba(0,255,231,0.12)",borderRadius:8,padding:"12px 14px",color:"#c8e8e5",fontFamily:"'Share Tech Mono'",fontSize:13,marginBottom:16},
+    txa:{width:"100%",background:"rgba(0,255,231,0.03)",border:"1px solid rgba(0,255,231,0.12)",borderRadius:8,padding:"12px 14px",color:"#c8e8e5",fontFamily:"'Rajdhani'",fontSize:15,resize:"vertical",minHeight:110,marginBottom:8},
+    sel:{width:"100%",background:"rgba(0,255,231,0.03)",border:"1px solid rgba(0,255,231,0.12)",borderRadius:8,padding:"12px 14px",color:"#c8e8e5",fontFamily:"'Share Tech Mono'",fontSize:13,marginBottom:16,cursor:"pointer"},
+    btn:(on)=>({width:"100%",padding:"14px",background:on?"#00ffe7":"transparent",border:"1.5px solid #00ffe7",borderRadius:8,color:on?"#080b0d":"#00ffe7",fontFamily:"'Rajdhani'",fontWeight:700,fontSize:16,letterSpacing:2,cursor:on?"pointer":"not-allowed",opacity:on?1:0.35,boxShadow:on?"0 0 20px rgba(0,255,231,0.25)":"none",transition:"all 0.2s"}),
+    err:{fontFamily:"'Share Tech Mono'",fontSize:12,color:"#ff4466",marginBottom:12,padding:"10px 12px",background:"rgba(255,68,102,0.08)",borderRadius:6,border:"1px solid rgba(255,68,102,0.2)",lineHeight:1.6},
+    ok:{fontFamily:"'Share Tech Mono'",fontSize:12,color:"#00ffe7",marginBottom:12,padding:"10px 12px",background:"rgba(0,255,231,0.06)",borderRadius:6,border:"1px solid rgba(0,255,231,0.2)"},
+    drop:(has)=>({border:`1.5px dashed ${has?"rgba(0,255,231,0.5)":"rgba(0,255,231,0.2)"}`,borderRadius:10,padding:"24px",textAlign:"center",marginBottom:16,cursor:"pointer",background:"rgba(0,255,231,0.02)"}),
+    divRow:{display:"flex",alignItems:"center",gap:12,marginBottom:20},
+    divLine:{flex:1,height:1,background:"rgba(0,255,231,0.08)"},
+    divTxt:{fontSize:11,color:"#2a5a57",fontFamily:"'Share Tech Mono'",letterSpacing:2},
+    aCard:{background:"rgba(0,255,231,0.04)",border:"1px solid rgba(0,255,231,0.15)",borderRadius:10,padding:"16px",marginTop:16},
+    dot:(a,d)=>({flex:1,height:3,borderRadius:2,background:d?"#00ffe7":a?"rgba(0,255,231,0.5)":"rgba(0,255,231,0.1)",transition:"background 0.4s"}),
   };
 
   return (
     <div style={S.root}>
-      <div style={S.bg}/>
-      <div style={S.grid}/>
+      <div style={S.bg}/><div style={S.grid}/>
 
-      {/* Header */}
-      <div style={{zIndex:1, textAlign:"center", marginBottom:32}}>
+      <div style={{zIndex:1,textAlign:"center",marginBottom:32}}>
         <Waveform active={playing||generating}/>
-        <div style={{...S.tag, marginTop:16}}>[ VOICE SYNTHESIS ENGINE ]</div>
+        <div style={{...S.tag,marginTop:16}}>[ VOICE SYNTHESIS ENGINE ]</div>
         <h1 style={S.title}>VOICE<span style={{color:"#00ffe7"}}>FORGE</span></h1>
-        <p style={{...S.sub, maxWidth:400, margin:"4px auto 0"}}>Clone any voice. Feed it samples. Make it speak anything.</p>
+        <p style={{...S.sub,maxWidth:400,margin:"4px auto 0"}}>Clone any voice. Feed it samples. Make it speak anything.</p>
       </div>
 
       <div style={S.card}>
-        {/* Step bar */}
-        <div style={{display:"flex", gap:8, marginBottom:32}}>
+        {/* step bar */}
+        <div style={{display:"flex",gap:8,marginBottom:32}}>
           {["API KEY","CLONE","SPEAK"].map((l,i)=>(
             <div key={l} style={{flex:1}}>
-              <div style={S.stepDot(stepIdx===i, stepIdx>i)}/>
-              <div style={{fontSize:10,fontFamily:"'Share Tech Mono'",letterSpacing:2,color:stepIdx>=i?"#00ffe7":"#2a4a47",marginTop:6}}>{l}</div>
+              <div style={S.dot(si===i,si>i)}/>
+              <div style={{fontSize:10,fontFamily:"'Share Tech Mono'",letterSpacing:2,color:si>=i?"#00ffe7":"#2a4a47",marginTop:6}}>{l}</div>
             </div>
           ))}
         </div>
 
-        {/* STEP 1 */}
-        {step==="key" && (
-          <div style={{animation:"fadeUp 0.4s ease"}}>
-            <div style={S.tag}>STEP 01</div>
-            <h2 style={{...S.title,fontSize:22,marginBottom:6}}>Connect to ElevenLabs</h2>
-            <p style={S.sub}>
-              Free account at <a href="https://elevenlabs.io" target="_blank" rel="noreferrer" style={{color:"#00ffe7",fontFamily:"'Share Tech Mono'",fontSize:12}}>elevenlabs.io</a> → Settings → API Keys → Copy
-            </p>
-            <label style={S.label}>YOUR API KEY</label>
-            <input style={S.input} type="password" placeholder="your-api-key-here"
-              value={apiKey} onChange={e=>setApiKey(e.target.value)}
-              onKeyDown={e=>e.key==="Enter"&&verifyKey()}/>
-            {apiKeyError && <div style={apiKeyError.includes("❌")?S.err:S.ok}>{apiKeyError}</div>}
-            <button style={{...S.btn,...(apiKey?S.btnOn:S.btnOff)}} onClick={verifyKey} disabled={!apiKey}>
-              CONNECT →
-            </button>
+        {/* ── STEP 1 ── */}
+        {step==="key" && <div style={{animation:"fadeUp 0.4s ease"}}>
+          <div style={S.tag}>STEP 01</div>
+          <h2 style={{...S.title,fontSize:22,marginBottom:6}}>Connect to ElevenLabs</h2>
+          <p style={S.sub}>
+            <a href="https://elevenlabs.io/app/developers/api-keys" target="_blank" rel="noreferrer"
+              style={{color:"#00ffe7",fontFamily:"'Share Tech Mono'",fontSize:12}}>elevenlabs.io → Developers → API Keys</a>
+            {" "}→ Create Key → Copy
+          </p>
+          <label style={S.lbl}>YOUR API KEY</label>
+          <input style={S.inp} type="password" placeholder="sk_..."
+            value={apiKey} onChange={e=>setApiKey(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&verifyKey()}/>
+          {keyErr && <div style={keyErr.includes("❌")?S.err:S.ok}>{keyErr}</div>}
+          <button style={S.btn(!!apiKey&&keyErr!=="Connecting...")} onClick={verifyKey} disabled={!apiKey}>
+            {keyErr==="Connecting..."?"⏳ CONNECTING...":"CONNECT →"}
+          </button>
+        </div>}
+
+        {/* ── STEP 2 ── */}
+        {step==="clone" && <div style={{animation:"fadeUp 0.4s ease"}}>
+          <div style={S.tag}>STEP 02</div>
+          <h2 style={{...S.title,fontSize:22,marginBottom:6}}>Clone a Voice</h2>
+          <p style={S.sub}>Upload 1–5 audio samples (MP3/WAV). 30 sec – 3 min each works best.</p>
+
+          {voices.length>0 && <>
+            <label style={S.lbl}>USE EXISTING CLONED VOICE</label>
+            <select style={S.sel} value={selVoice} onChange={e=>setSelVoice(e.target.value)}>
+              {voices.map(v=><option key={v.voice_id} value={v.voice_id}>{v.name}</option>)}
+            </select>
+            <button style={{...S.btn(true),marginBottom:20}} onClick={()=>setStep("speak")}>USE THIS VOICE →</button>
+            <div style={S.divRow}><div style={S.divLine}/><span style={S.divTxt}>OR CLONE NEW</span><div style={S.divLine}/></div>
+          </>}
+
+          <label style={S.lbl}>VOICE NAME</label>
+          <input style={S.inp} placeholder="e.g. My Voice, Naruto..." value={voiceName} onChange={e=>setVoiceName(e.target.value)}/>
+
+          <label style={S.lbl}>AUDIO SAMPLES</label>
+          <div style={S.drop(files.length>0)} onClick={()=>fileRef.current?.click()}>
+            <input ref={fileRef} type="file" accept="audio/*" multiple style={{display:"none"}}
+              onChange={e=>setFiles(Array.from(e.target.files))}/>
+            {files.length===0
+              ? <><div style={{fontSize:28,marginBottom:8}}>🎙️</div>
+                  <div style={{color:"#3a6a67",fontFamily:"'Share Tech Mono'",fontSize:12}}>Tap to upload audio files</div>
+                  <div style={{color:"#2a4a47",fontSize:11,marginTop:4}}>MP3 · WAV · M4A · FLAC</div></>
+              : <div>{files.map((f,i)=><div key={i} style={{fontFamily:"'Share Tech Mono'",fontSize:12,color:"#00ffe7",marginBottom:4}}>▸ {f.name}</div>)}
+                  <div style={{fontSize:11,color:"#3a6a67",marginTop:8}}>Tap to change</div></div>}
           </div>
-        )}
 
-        {/* STEP 2 */}
-        {step==="clone" && (
-          <div style={{animation:"fadeUp 0.4s ease"}}>
-            <div style={S.tag}>STEP 02</div>
-            <h2 style={{...S.title,fontSize:22,marginBottom:6}}>Clone a Voice</h2>
-            <p style={S.sub}>Upload 1–5 audio samples (MP3/WAV). 30 sec – 3 min each works best.</p>
+          {cloneMsg && <div style={cloneMsg.includes("✅")?S.ok:cloneMsg.includes("❌")?S.err:S.ok}>{cloneMsg}</div>}
+          <button style={S.btn(!!(voiceName&&files.length&&!cloning))} onClick={cloneVoice} disabled={!voiceName||!files.length||cloning}>
+            {cloning?"⏳ CLONING...":"CLONE VOICE →"}
+          </button>
+        </div>}
 
-            {clonedVoices.length>0 && <>
-              <label style={S.label}>USE EXISTING CLONED VOICE</label>
-              <select style={S.select} value={selectedVoice} onChange={e=>setSelectedVoice(e.target.value)}>
-                {clonedVoices.map(v=><option key={v.voice_id} value={v.voice_id}>{v.name}</option>)}
-              </select>
-              <button style={{...S.btn,...S.btnOn,marginBottom:20}} onClick={()=>setStep("speak")}>USE THIS VOICE →</button>
-              <div style={S.divider}><div style={S.divLine}/><span style={S.divTxt}>OR CLONE NEW</span><div style={S.divLine}/></div>
-            </>}
+        {/* ── STEP 3 ── */}
+        {step==="speak" && <div style={{animation:"fadeUp 0.4s ease"}}>
+          <div style={S.tag}>STEP 03</div>
+          <h2 style={{...S.title,fontSize:22,marginBottom:6}}>Make It Speak</h2>
+          <p style={S.sub}>Type anything. The cloned voice will read it.</p>
 
-            <label style={S.label}>VOICE NAME</label>
-            <input style={S.input} placeholder="e.g. My Voice, Naruto..." value={voiceName} onChange={e=>setVoiceName(e.target.value)}/>
+          {voices.length>0 && <>
+            <label style={S.lbl}>ACTIVE VOICE</label>
+            <select style={S.sel} value={selVoice} onChange={e=>setSelVoice(e.target.value)}>
+              {voices.map(v=><option key={v.voice_id} value={v.voice_id}>{v.name}</option>)}
+            </select>
+          </>}
 
-            <label style={S.label}>AUDIO SAMPLES</label>
-            <div style={{...S.drop, borderColor:files.length?"rgba(0,255,231,0.5)":"rgba(0,255,231,0.2)"}}
-              onClick={()=>fileInputRef.current?.click()}>
-              <input ref={fileInputRef} type="file" accept="audio/*" multiple style={{display:"none"}}
-                onChange={e=>setFiles(Array.from(e.target.files))}/>
-              {files.length===0 ? <>
-                <div style={{fontSize:28,marginBottom:8}}>🎙️</div>
-                <div style={{color:"#3a6a67",fontFamily:"'Share Tech Mono'",fontSize:12}}>Click to upload audio files</div>
-                <div style={{color:"#2a4a47",fontSize:11,marginTop:4}}>MP3 · WAV · M4A · FLAC</div>
-              </> : <div>
-                {files.map((f,i)=><div key={i} style={{fontFamily:"'Share Tech Mono'",fontSize:12,color:"#00ffe7",marginBottom:4}}>▸ {f.name}</div>)}
-                <div style={{fontSize:11,color:"#3a6a67",marginTop:8}}>Click to change</div>
-              </div>}
+          <label style={S.lbl}>TEXT TO SPEAK</label>
+          <textarea style={S.txa} placeholder="Type anything here..." value={text} onChange={e=>setText(e.target.value)}/>
+          <div style={{fontFamily:"'Share Tech Mono'",fontSize:11,color:"#2a4a47",marginBottom:16}}>{text.length} chars · Free: 10,000/month</div>
+
+          {genErr && <div style={S.err}>{genErr}</div>}
+          <button style={S.btn(!!(text&&selVoice&&!generating))} onClick={generateSpeech} disabled={!text||!selVoice||generating}>
+            {generating?"⏳ GENERATING...":"⚡ GENERATE SPEECH"}
+          </button>
+
+          {audioUrl && <div style={S.aCard}>
+            <div style={{fontFamily:"'Share Tech Mono'",fontSize:11,color:"#00ffe7",marginBottom:12,letterSpacing:2}}>✅ VOICE READY</div>
+            <Waveform active={playing} bars={36}/>
+            <audio src={audioUrl} style={{width:"100%",marginTop:12,accentColor:"#00ffe7"}} controls
+              onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)} onEnded={()=>setPlaying(false)}/>
+            <div style={{marginTop:12,textAlign:"right"}}>
+              <a href={audioUrl} download="voiceforge.mp3" style={{color:"#00ffe7",fontFamily:"'Share Tech Mono'",fontSize:12,textDecoration:"none"}}>↓ DOWNLOAD</a>
             </div>
+          </div>}
 
-            {cloneStatus && <div style={cloneStatus.includes("✅")?S.ok:cloneStatus.includes("❌")?S.err:S.ok}>{cloneStatus}</div>}
-
-            <button style={{...S.btn,...((voiceName&&files.length&&!cloning)?S.btnOn:S.btnOff)}}
-              onClick={cloneVoice} disabled={!voiceName||files.length===0||cloning}>
-              {cloning?"⏳ CLONING...":"CLONE VOICE →"}
-            </button>
+          <div style={{marginTop:20,textAlign:"center"}}>
+            <button style={{background:"none",border:"none",color:"#2a5a57",fontFamily:"'Share Tech Mono'",fontSize:11,cursor:"pointer",letterSpacing:2}}
+              onClick={()=>setStep("clone")}>← CLONE ANOTHER VOICE</button>
           </div>
-        )}
-
-        {/* STEP 3 */}
-        {step==="speak" && (
-          <div style={{animation:"fadeUp 0.4s ease"}}>
-            <div style={S.tag}>STEP 03</div>
-            <h2 style={{...S.title,fontSize:22,marginBottom:6}}>Make It Speak</h2>
-            <p style={S.sub}>Type anything. The cloned voice will read it.</p>
-
-            {clonedVoices.length>0 && <>
-              <label style={S.label}>ACTIVE VOICE</label>
-              <select style={S.select} value={selectedVoice} onChange={e=>setSelectedVoice(e.target.value)}>
-                {clonedVoices.map(v=><option key={v.voice_id} value={v.voice_id}>{v.name}</option>)}
-              </select>
-            </>}
-
-            <label style={S.label}>TEXT TO SPEAK</label>
-            <textarea style={S.textarea} placeholder="Type anything here..." value={text} onChange={e=>setText(e.target.value)}/>
-            <div style={{fontFamily:"'Share Tech Mono'",fontSize:11,color:"#2a4a47",marginBottom:16}}>{text.length} chars — Free: 10,000/month</div>
-
-            {genError && <div style={S.err}>{genError}</div>}
-
-            <button style={{...S.btn,...((text&&selectedVoice&&!generating)?S.btnOn:S.btnOff)}}
-              onClick={generateSpeech} disabled={!text||!selectedVoice||generating}>
-              {generating?"⏳ GENERATING...":"⚡ GENERATE SPEECH"}
-            </button>
-
-            {audioUrl && <div style={S.audioCard}>
-              <div style={{fontFamily:"'Share Tech Mono'",fontSize:11,color:"#00ffe7",marginBottom:12,letterSpacing:2}}>✅ VOICE READY</div>
-              <Waveform active={playing} bars={36}/>
-              <audio src={audioUrl} style={{width:"100%",marginTop:12,accentColor:"#00ffe7"}} controls
-                onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)} onEnded={()=>setPlaying(false)}/>
-              <div style={{marginTop:12,textAlign:"right"}}>
-                <a href={audioUrl} download="voiceforge.mp3" style={{color:"#00ffe7",fontFamily:"'Share Tech Mono'",fontSize:12,textDecoration:"none"}}>↓ DOWNLOAD</a>
-              </div>
-            </div>}
-
-            <div style={{marginTop:20,textAlign:"center"}}>
-              <button style={{background:"none",border:"none",color:"#2a5a57",fontFamily:"'Share Tech Mono'",fontSize:11,cursor:"pointer",letterSpacing:2}}
-                onClick={()=>setStep("clone")}>← CLONE ANOTHER VOICE</button>
-            </div>
-          </div>
-        )}
+        </div>}
       </div>
 
       <div style={{marginTop:24,fontFamily:"'Share Tech Mono'",fontSize:11,color:"#1a3a37",letterSpacing:2,zIndex:1}}>
